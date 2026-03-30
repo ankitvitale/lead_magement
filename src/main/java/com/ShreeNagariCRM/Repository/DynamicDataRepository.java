@@ -35,6 +35,9 @@ public interface DynamicDataRepository extends JpaRepository<DynamicData,Long> {
 
     long countByUploadSessionId(String sessionId);
 
+    // DynamicDataRepository
+    List<DynamicData> findByUploadSessionIdAndAssignedEmployeeIsNull(String sessionId);
+
 
     /**
      * Full-text search on the resolved fields only (not the JSON blob —
@@ -59,5 +62,22 @@ public interface DynamicDataRepository extends JpaRepository<DynamicData,Long> {
     @Modifying
     @Transactional
     void deleteByUploadSessionId(String sessionId);
+
+    // DynamicDataRepository.java
+
+    // Count by sessionId + leadStatus
+    @Query("SELECT d.mappedLeadStatus, COUNT(d) " +
+            "FROM DynamicData d " +
+            "WHERE d.uploadSessionId = :sessionId " +
+            "GROUP BY d.mappedLeadStatus")
+    List<Object[]> countBySessionIdGroupByStatus(
+            @Param("sessionId") String sessionId);
+
+    // ✅ Used by USER — get only his assigned rows in a session
+    List<DynamicData> findByUploadSessionIdAndAssignedEmployee_Id(
+            String uploadSessionId, Long employeeId);
+
+    List<DynamicData> findByUploadSessionIdAndAssignedEmployeeId(
+            String sessionId, Long employeeId);
 
 }

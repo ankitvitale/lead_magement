@@ -1,6 +1,11 @@
 package com.ShreeNagariCRM.helper;
 
+import com.ShreeNagariCRM.DTO.excelDto.ExcelSessionResponseDto;
 import com.ShreeNagariCRM.DTO.excelDto.SuggestedMapping;
+import com.ShreeNagariCRM.Entity.ExcelImportSession;
+import com.ShreeNagariCRM.Entity.enums.LeadStatus;
+import com.ShreeNagariCRM.Repository.DynamicDataRepository;
+import lombok.RequiredArgsConstructor;
 import org.apache.poi.ss.usermodel.*;
 
 import org.springframework.stereotype.Component;
@@ -9,7 +14,22 @@ import org.springframework.web.multipart.MultipartFile;
 import java.util.*;
 
 @Component
+@RequiredArgsConstructor
 public class ExcelHelper {
+
+    private final DynamicDataRepository dynamicDataRepository;
+
+    // ── Keywords used for auto-detecting column purposes ─────────────────────
+    private static final List<String> NAME_HINTS =
+            List.of("name", "customer name", "client name", "full name",
+                    "client", "customer", "buyer", "person", "contact name");
+
+    private static final List<String> PHONE_HINTS =
+            List.of("phone", "mobile", "contact", "cell", "number",
+                    "phone number", "mobile number", "contact number", "mob", "ph");
+
+    private static final List<String> EMAIL_HINTS =
+            List.of("email", "mail", "email id", "email address", "e-mail");
 
     public static Workbook getWorkbook(MultipartFile file) {
         try {
@@ -74,15 +94,17 @@ public class ExcelHelper {
         return count;
     }
 
+
+
     public static SuggestedMapping detectMapping(List<String> headers) {
 
-        String name  = find(headers, List.of("name", "customer"));
-        String phone = find(headers, List.of("phone", "mobile"));
-        String email = find(headers, List.of("email"));
+        String name  = find(headers, merge("name", NAME_HINTS));
+        String phone = find(headers, merge("phone", PHONE_HINTS));
+        String email = find(headers, merge("email", EMAIL_HINTS));
 
-        String confidence = (name != null && phone != null)
+        String confidence = (hasText(name) && hasText(phone))
                 ? "HIGH"
-                : (name != null ? "MEDIUM" : "LOW");
+                : (hasText(name) ? "MEDIUM" : "LOW");
 
         return SuggestedMapping.builder()
                 .nameColumn(name != null ? name : "")
@@ -92,15 +114,29 @@ public class ExcelHelper {
                 .build();
     }
 
+    private static boolean hasText(String value) {
+        return value != null && !value.trim().isEmpty();
+    }
+
+    private static List<String> merge(String primary, List<String> hints) {
+        List<String> list = new ArrayList<>();
+        list.add(primary.toLowerCase());
+        list.addAll(hints);
+        return list;
+    }
+
     private static String find(List<String> headers, List<String> hints) {
+
         for (String header : headers) {
+            String lowerHeader = header.toLowerCase();
+
             for (String hint : hints) {
-                if (header.toLowerCase().contains(hint)) {
+                if (lowerHeader.contains(hint.toLowerCase())) {
                     return header;
                 }
             }
         }
-        return "";
+        return null; // important change
     }
 
     private static String getCellValue(Cell cell) {
@@ -115,4 +151,6 @@ public class ExcelHelper {
         }
         return true;
     }
+
+
 }

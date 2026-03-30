@@ -1,26 +1,32 @@
 package com.ShreeNagariCRM.Service;
 
 import com.ShreeNagariCRM.DTO.baseDto.ApiResponse;
-import com.ShreeNagariCRM.DTO.excelDto.ExcelPreviewDto;
-import com.ShreeNagariCRM.DTO.excelDto.SuggestedMapping;
+import com.ShreeNagariCRM.DTO.excelDto.*;
 import com.ShreeNagariCRM.Entity.DynamicData;
 import com.ShreeNagariCRM.Entity.ExcelImportSession;
 import com.ShreeNagariCRM.Entity.User;
 import com.ShreeNagariCRM.Entity.enums.LeadStatus;
+import com.ShreeNagariCRM.Entity.enums.Role;
 import com.ShreeNagariCRM.Repository.DynamicDataRepository;
 import com.ShreeNagariCRM.Repository.ExcelImportSessionRepository;
 import com.ShreeNagariCRM.Repository.UserRepository;
+import com.ShreeNagariCRM.exception.ResourceNotFoundException;
 import com.ShreeNagariCRM.helper.ExcelHelper;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.ss.usermodel.*;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -31,6 +37,7 @@ public class ExcelImportService {
     private final ExcelImportSessionRepository sessionRepository;
     private final UserRepository employeeRepository;
     private final ObjectMapper objectMapper;
+    private final ExcelHelper excelHelper;
 
 
     // ── Keywords used for auto-detecting column purposes ─────────────────────
@@ -60,7 +67,7 @@ public class ExcelImportService {
      * Does NOT persist any DynamicData rows yet.
      */
     @Transactional
-    public ApiResponse<ExcelPreviewDto> previewImport(MultipartFile file) throws IOException {
+    public ApiResponse<ExcelPreviewDto> previewImport(MultipartFile file,User user) throws IOException {
 
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("File is empty");
@@ -95,6 +102,7 @@ public class ExcelImportService {
                 .totalRows(totalRows)
                 .importedRows(0)
                 .skippedRows(0)
+                .uploadedBy(user)
                 .detectedHeaders(toJson(headers))
                 .status(ExcelImportSession.ImportStatus.PROCESSING)
                 .build();
@@ -124,21 +132,37 @@ public class ExcelImportService {
      * Reads the original file again and persists every row as DynamicData.
      */
     @Transactional
-    public Map<String, Object> confirmImport(
+    public ApiResponse<ExcelImportResultDto> confirmImport(
             MultipartFile file,
             String  sessionId,
             String  nameColumn,
             String  phoneColumn,
             String  emailColumn,
-            Long    assignToAgentId,
-            LeadStatus defaultStatus) throws IOException {
+            LeadStatus defaultStatus,
+            User uploadedByUser) throws IOException {
+
+        if (file == null || file.isEmpty()) {
+            throw new IllegalArgumentException("File is empty");
+        }
 
         ExcelImportSession session = sessionRepository.findById(sessionId)
-                .orElseThrow(() -> new RuntimeException("Session not found: " + sessionId));
+                .orElseThrow(() -> new ResourceNotFoundException("Session not found: " + sessionId));
 
-        User employee = assignToAgentId != null
-                ? employeeRepository.findById(assignToAgentId).orElse(null)
-                : null;
+
+        // ✅ Security check — only the person who previewed can confirm
+        // (or ADMIN can confirm anyone's session)
+        if (!isAdmin(uploadedByUser)
+                && ! session.getUploadedBy().getId().equals(uploadedByUser.getId())) {
+            throw new SecurityException(
+                    "You are not allowed to confirm this session");
+        }
+
+        User assignedEmployee = null;
+
+        if (uploadedByUser.getRole().equals(Role.USER)){
+             assignedEmployee = uploadedByUser;
+        }
+
 
         LeadStatus status = defaultStatus != null ? defaultStatus : LeadStatus.NEW;
 
@@ -198,7 +222,7 @@ public class ExcelImportService {
                             .resolvedPhone(resolvedPhone)
                             .resolvedEmail(resolvedEmail)
                             .mappedLeadStatus(status)
-                            .assignedEmployee(employee)
+                            .assignedEmployee(assignedEmployee)
                             .uploadSessionId(sessionId)
                             .build();
 
@@ -221,30 +245,161 @@ public class ExcelImportService {
                 : ExcelImportSession.ImportStatus.COMPLETED);
         sessionRepository.save(session);
 
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("sessionId",     sessionId);
-        result.put("fileName",      file.getOriginalFilename());
-        result.put("importedRows",  imported);
-        result.put("skippedRows",   skipped);
-        result.put("skippedReasons", skippedReasons);
-        result.put("status",        session.getStatus().name());
+        // Build DTO
+        ExcelImportResultDto dto = ExcelImportResultDto.builder()
+                .sessionId(sessionId)
+                .fileName(file.getOriginalFilename())
+                .importedRows(imported)
+                .skippedRows(skipped)
+                .skippedReasons(skippedReasons)
+                .status(session.getStatus().name())
+                .build();
 
-        log.info("Excel import done: {} | imported={} skipped={}", file.getOriginalFilename(), imported, skipped);
-        return result;
-    }
+        log.info("Excel import done: {} | imported={} skipped={}",
+                file.getOriginalFilename(), imported, skipped);
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // DELETE SESSION (Undo Import)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    @Transactional
-    public void deleteSession(String sessionId) {
-        dynamicDataRepository.deleteByUploadSessionId(sessionId);
-        sessionRepository.deleteById(sessionId);
-        log.info("Import session {} deleted (undo import)", sessionId);
+        return ApiResponse.success("Import completed successfully", dto);
     }
 
 
+
+    public ApiResponse<List<ExcelSessionResponseDto>> getSessions(User currentUser){
+
+        List<ExcelImportSession> sessions;
+
+        if (isAdmin(currentUser)) {
+            // ✅ Admin sees ALL completed sessions
+            sessions = sessionRepository
+                    .findCompletedSessionsOrderByUploadedAtDesc();
+        } else {
+            // ✅ User sees ONLY sessions he uploaded
+            sessions = sessionRepository
+                    .findSessionsForUser(currentUser.getId());
+        }
+
+        List<ExcelSessionResponseDto> result = sessions.stream()
+                .map(session -> mapSession(session, currentUser))
+                .toList();
+
+        return ApiResponse.success("Excel sessions fetch successfully.",result);
+    }
+
+
+
+    public ApiResponse<DynamicDataResponseDto> updateRowStatus(Long id,
+                                                               LeadStatus status,User currentUser) {
+        DynamicData row = dynamicDataRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Row not found: " + id));
+
+        // ✅ User can only update his own assigned rows
+        if (!isAdmin(currentUser)) {
+            if (row.getAssignedEmployee() == null
+                    || !row.getAssignedEmployee().getId()
+                    .equals(currentUser.getId())) {
+                throw new SecurityException(
+                        "You are not allowed to update this row. "
+                                + "This row is not assigned to you.");
+            }
+        }
+        row.setMappedLeadStatus(status);
+        dynamicDataRepository.save(row);
+        return ApiResponse.success("Row status updated successfully.",dynamicDataConvertToResponse(row));
+    }
+
+//    // ─────────────────────────────────────────────────────────────────────────
+//    // DELETE SESSION (Undo Import)
+//    // ─────────────────────────────────────────────────────────────────────────
+//
+//    @Transactional
+//    public void deleteSession(String sessionId) {
+//        dynamicDataRepository.deleteByUploadSessionId(sessionId);
+//        sessionRepository.deleteById(sessionId);
+//        log.info("Import session {} deleted (undo import)", sessionId);
+//    }
+//
+
+
+
+     public ApiResponse<List<DynamicDataResponseDto>> getRowsBySession(String sessionId,User currentUser){
+         List<DynamicData> rows;
+
+         if (isAdmin(currentUser)) {
+             // ✅ Admin sees ALL rows of this session
+             rows = dynamicDataRepository.findByUploadSessionId(sessionId);
+         } else {
+             // ✅ User sees ONLY rows assigned to him in this session
+             rows = dynamicDataRepository
+                     .findByUploadSessionIdAndAssignedEmployee_Id(
+                             sessionId, currentUser.getId());
+         }
+         // Convert each row — parse data String → Map
+         List<DynamicDataResponseDto> result = rows.stream()
+                 .map(row -> dynamicDataConvertToResponse(row))
+                 .collect(Collectors.toList());
+
+         return ApiResponse.success("Session dynamic data fetched successfully.",result);
+     }
+
+
+     public ApiResponse<List<DynamicDataResponseDto>> assignMultipleRows(BulkAssignRequest request) {
+
+         User agent = employeeRepository.findById(request.getAgentId())
+                 .orElseThrow(() -> new ResourceNotFoundException(
+                         "Agent not found: " + request.getAgentId()));
+
+         List<DynamicData> rows = dynamicDataRepository.findAllById(request.getRowIds());
+
+         if (rows.isEmpty()) {
+             throw new ResourceNotFoundException("No rows found");
+         }
+
+         // ✅ Filter out already-assigned rows
+         List<DynamicData> alreadyAssigned = rows.stream()
+                 .filter(r -> r.getAssignedEmployee() != null)
+                 .collect(Collectors.toList());
+
+
+         List<DynamicData> toAssign = rows.stream()
+                 .filter(r -> r.getAssignedEmployee() == null)
+                 .collect(Collectors.toList());
+
+         // Assign only unassigned rows
+         for (DynamicData row : toAssign) {
+             row.setAssignedEmployee(agent);
+         }
+         dynamicDataRepository.saveAll(toAssign);
+
+         // Build response with summary
+         Map<String, Object> summary = new LinkedHashMap<>();
+         summary.put("assignedCount", toAssign.size());
+         summary.put("skippedAlreadyAssigned", alreadyAssigned.stream()
+                 .map(r -> Map.of(
+                         "rowId", r.getId(),
+                         "assignedTo", r.getAssignedEmployee().getName()
+                 ))
+                 .collect(Collectors.toList()));
+
+         List<DynamicDataResponseDto> responseDtoList = toAssign.stream()
+                 .map(this::dynamicDataConvertToResponse)
+                 .collect(Collectors.toList());
+
+         return ApiResponse.success(
+                 "Assigned " + toAssign.size() + " rows. Skipped " +
+                         alreadyAssigned.size() + " already assigned rows.",
+                 responseDtoList);
+     }
+
+    public ApiResponse<List<DynamicDataResponseDto>> getUnassignedRows(String sessionId) {
+        List<DynamicData> rows = dynamicDataRepository
+                .findByUploadSessionIdAndAssignedEmployeeIsNull(sessionId);
+
+        List<DynamicDataResponseDto> result = rows.stream()
+                .map(this::dynamicDataConvertToResponse)
+                .collect(Collectors.toList());
+
+        return ApiResponse.success(
+                "Unassigned rows fetched. Count: " + result.size(), result);
+    }
 
 
     /**
@@ -356,4 +511,96 @@ public class ExcelImportService {
             throw new RuntimeException("JSON conversion failed");
         }
     }
+
+
+    // Helper method — converts DynamicData entity to clean DTO
+    private DynamicDataResponseDto dynamicDataConvertToResponse(DynamicData row) {
+        try {
+            // ✅ Parse the JSON string into a real Map
+            Map<String, Object> dataMap = objectMapper.readValue(
+                    row.getData(),
+                    new TypeReference<Map<String, Object>>() {}
+            );
+
+            return DynamicDataResponseDto.builder()
+                    .id(row.getId())
+                    .data(dataMap)                          // ✅ Map not String
+                   // .fileName(row.getFileName())
+                    .rowNumber(row.getRowNumber())
+                   // .sheetName(row.getSheetName())
+                  //  .resolvedName(row.getResolvedName())
+                    //.resolvedEmail(row.getResolvedEmail())
+                   // .resolvedPhone(row.getResolvedPhone())
+                  //  .mappedLeadStatus(row.getMappedLeadStatus())
+                    .status(row.getMappedLeadStatus())
+                   // .uploadSessionId(row.getUploadSessionId())
+                    .uploadedAt(row.getUploadedAt())
+                    .assignedEmployeeId(
+                            row.getAssignedEmployee() != null
+                                    ? row.getAssignedEmployee().getId() : null)
+                    .assignedEmployeeName(
+                            row.getAssignedEmployee() != null
+                                    ? row.getAssignedEmployee().getName() : null)
+                    .build();
+
+        } catch (Exception e) {
+            // If JSON parsing fails — return empty map with error
+            return DynamicDataResponseDto.builder()
+                    .id(row.getId())
+                    .data(Map.of("error", "Could not parse data", "raw", row.getData()))
+                   // .fileName(row.getFileName())
+                  //  .uploadSessionId(row.getUploadSessionId())
+                    .build();
+        }
+
+}
+
+    private boolean isAdmin(User user) {
+        // Change Role.ADMIN to whatever your admin role enum value is
+        return user.getRole() == Role.ADMIN;
+    }
+
+    private ExcelSessionResponseDto mapSession(ExcelImportSession session, User currentUser) {
+
+        List<DynamicData> rows;
+
+        if (isAdmin(currentUser)) {
+            rows = dynamicDataRepository.findByUploadSessionId(session.getSessionId());
+        } else {
+            rows = dynamicDataRepository
+                    .findByUploadSessionIdAndAssignedEmployeeId(
+                            session.getSessionId(), currentUser.getId());
+        }
+
+        long totalDynamicRows = rows.size();
+
+        Map<String, Long> statusCount = rows.stream()
+                .collect(Collectors.groupingBy(
+                        r -> r.getMappedLeadStatus().name(),
+                        Collectors.counting()
+                ));
+
+        // ✅ Add these two lines
+        long assignedCount   = rows.stream()
+                .filter(r -> r.getAssignedEmployee() != null).count();
+        long unassignedCount = totalDynamicRows - assignedCount;
+
+        return ExcelSessionResponseDto.builder()
+                .sessionId(session.getSessionId())
+                .originalFileName(session.getOriginalFileName())
+                .importedRows(session.getImportedRows())
+                .skippedRows(session.getSkippedRows())
+                .importStatus(session.getStatus().name())
+                .uploadedAt(session.getUploadedAt())
+                .uploadedById(session.getUploadedBy().getId())
+                .uploadedByName(session.getUploadedBy().getName())
+                .totalRows((int) totalDynamicRows)
+                .totalDynamicRows(totalDynamicRows)
+                .leadStatusCount(statusCount)
+                .assignedCount(assignedCount)       // ✅
+                .unassignedCount(unassignedCount)   // ✅
+                .build();
+    }
+
+
 }

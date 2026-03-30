@@ -3,11 +3,9 @@ package com.ShreeNagariCRM.Service;
 import com.ShreeNagariCRM.DTO.leadDto.FileDataResponseDTO;
 import com.ShreeNagariCRM.Entity.DynamicData;
 import com.ShreeNagariCRM.Entity.Leads;
-import com.ShreeNagariCRM.Entity.User;
 import com.ShreeNagariCRM.Entity.enums.LeadStatus;
-import com.ShreeNagariCRM.Repository.DynamicDataRepostory;
+import com.ShreeNagariCRM.Repository.DynamicDataRepository;
 import com.ShreeNagariCRM.Repository.LeadRepository;
-import com.ShreeNagariCRM.Repository.UserRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
@@ -29,7 +27,7 @@ public class ExcelService {
 
 
     @Autowired
-    private DynamicDataRepostory dynamicDataRepostory;
+    private DynamicDataRepository dynamicDataRepository;
 
     public void saveExcelData(MultipartFile file) throws Exception {
 
@@ -159,18 +157,18 @@ public class ExcelService {
             list.add(data);
         }
 
-        dynamicDataRepostory.saveAll(list);
+        dynamicDataRepository.saveAll(list);
     }
 
 
 
     public List<DynamicData> getDataByFileName(String fileName) {
-        return dynamicDataRepostory.findByFileName(fileName);
+        return dynamicDataRepository.findByFileName(fileName);
     }
 
     public List<FileDataResponseDTO> getAllFilesWithData() throws Exception {
 
-        List<DynamicData> allData = dynamicDataRepostory.findAll();
+        List<DynamicData> allData = dynamicDataRepository.findAll();
 
         Map<String, List<Map<String, Object>>> groupedData = new HashMap<>();
 
@@ -234,7 +232,7 @@ public class ExcelService {
 
     public FileDataResponseDTO getDataByFile(String fileName) throws Exception {
 
-        List<DynamicData> list = dynamicDataRepostory.findByFileName(fileName);
+        List<DynamicData> list = dynamicDataRepository.findByFileName(fileName);
 
         ObjectMapper mapper = new ObjectMapper();
 
@@ -246,7 +244,7 @@ public class ExcelService {
 
             map.put("id", d.getId());
             map.put("uploadedAt", d.getUploadedAt());
-            map.put("leadStatus", d.getLeadStatus());
+           // map.put("leadStatus", d.getLeadStatus());
 
             dataList.add(map);
         }
@@ -256,20 +254,20 @@ public class ExcelService {
 
     public String updateLeadStatus(Long id, String fileName, LeadStatus status) {
 
-        DynamicData data = dynamicDataRepostory
+        DynamicData data = dynamicDataRepository
                 .findByIdAndFileName(id, fileName)
                 .orElseThrow(() -> new RuntimeException("Record not found"));
 
-        data.setLeadStatus(status);
+      //  data.setLeadStatus(status);
 
-        dynamicDataRepostory.save(data);
+        dynamicDataRepository.save(data);
 
         return "Lead status updated successfully";
     }
 
     public List<FileDataResponseDTO> getAllFilesData() throws Exception {
 
-        List<DynamicData> list = dynamicDataRepostory.findAll();
+        List<DynamicData> list = dynamicDataRepository.findAll();
 
         ObjectMapper mapper = new ObjectMapper();
 
@@ -282,7 +280,7 @@ public class ExcelService {
 
             map.put("id", d.getId());
             map.put("uploadedAt", d.getUploadedAt());
-            map.put("leadStatus", d.getLeadStatus());
+           // map.put("leadStatus", d.getLeadStatus());
 
             groupedData
                     .computeIfAbsent(d.getFileName(), k -> new ArrayList<>())

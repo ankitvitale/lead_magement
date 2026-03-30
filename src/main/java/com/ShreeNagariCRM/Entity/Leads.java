@@ -1,48 +1,93 @@
 package com.ShreeNagariCRM.Entity;
 
 
+import com.ShreeNagariCRM.Entity.enums.LeadSource;
+import com.ShreeNagariCRM.Entity.enums.LeadStatus;
+import com.ShreeNagariCRM.Entity.enums.Priority;
+import com.ShreeNagariCRM.Entity.enums.PropertyType;
 import jakarta.persistence.*;
+import lombok.*;
+import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.UpdateTimestamp;
+
+import java.time.LocalDateTime;
 
 @Entity
+@Table(name = "leads")
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+@ToString(exclude = {"followUps"})
 public class Leads {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    // ── Contact ───────────────────────────────────────────────────────────────
+    @Column(nullable = false)
     private String name;
+
+    @Column
     private String email;
+
+    @Column(nullable = false)
     private String phone;
 
-    public Long getId() {
-        return id;
-    }
+    @Column
+    private String alternatePhone;
 
-    public void setId(Long id) {
-        this.id = id;
-    }
+    // ── Property Interest ─────────────────────────────────────────────────────
+    @Enumerated(EnumType.STRING)
+    @Column
+    private PropertyType propertyType;
 
-    public String getName() {
-        return name;
-    }
+    @Column
+    private String preferredLocation;
 
-    public void setName(String name) {
-        this.name = name;
-    }
+    @Column
+    private String budgetRange;       // display label  e.g. "₹1Cr – ₹2Cr"
 
-    public String getEmail() {
-        return email;
-    }
+    @Column
+    private Double budgetMinLakhs;    // numeric lower bound for property matching
 
-    public void setEmail(String email) {
-        this.email = email;
-    }
+    @Column
+    private Double budgetMaxLakhs;    // numeric upper bound
 
-    public String getPhone() {
-        return phone;
-    }
+    @Column(columnDefinition = "TEXT")
+    private String notes;
 
-    public void setPhone(String phone) {
-        this.phone = phone;
-    }
+    // ── CRM Meta ──────────────────────────────────────────────────────────────
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    @Builder.Default
+    private LeadStatus status = LeadStatus.NEW;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    @Builder.Default
+    private Priority priority = Priority.MEDIUM;
+
+    @Column(nullable = false)
+    @Builder.Default
+    private Integer score = 50;
+
+    @Enumerated(EnumType.STRING)
+    @Column
+    private LeadSource source;
+
+    // ── Assignment ────────────────────────────────────────────────────────────
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "assigned_emp_id")
+    private User assignedEmp;
+
+    // ── Timestamps ────────────────────────────────────────────────────────────
+    @CreationTimestamp
+    @Column(updatable = false)
+    private LocalDateTime createdAt;
+
+    @UpdateTimestamp
+    private LocalDateTime updatedAt;
+
 }

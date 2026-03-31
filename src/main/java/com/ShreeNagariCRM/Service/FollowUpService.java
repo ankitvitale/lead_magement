@@ -1,26 +1,25 @@
 package com.ShreeNagariCRM.Service;
 
 
-import com.ShreeNagariCRM.Entity.DynamicData;
-import com.ShreeNagariCRM.Entity.FollowUp;
-import com.ShreeNagariCRM.Entity.Leads;
-import com.ShreeNagariCRM.Entity.User;
-import com.ShreeNagariCRM.Entity.enums.FollowUpType;
+
+import com.ShreeNagariCRM.DTO.baseDto.ApiResponse;
+
+import com.ShreeNagariCRM.DTO.follow_up.*;
+import com.ShreeNagariCRM.Entity.*;
+import com.ShreeNagariCRM.Entity.EmployeeActivityLog.ActivityAction;
 import com.ShreeNagariCRM.Entity.enums.Priority;
-import com.ShreeNagariCRM.Repository.DynamicDataRepository;
-import com.ShreeNagariCRM.Repository.FollowUpRepository;
-import com.ShreeNagariCRM.Repository.LeadRepository;
-import com.ShreeNagariCRM.Repository.UserRepository;
-import jakarta.transaction.Transactional;
+import com.ShreeNagariCRM.Entity.enums.Role;
+import com.ShreeNagariCRM.Repository.*;
+import com.ShreeNagariCRM.exception.ResourceNotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -31,195 +30,486 @@ public class FollowUpService {
     private final FollowUpRepository followUpRepository;
     private final LeadRepository leadsRepository;
     private final DynamicDataRepository dynamicDataRepository;
-    private final UserRepository employeeRepository;
-
+    private final UserRepository userRepository;
+    private final FollowUpTransferLogRepository transferLogRepository;
+    private final ActivityLogService activityLogService;
 
     // ─────────────────────────────────────────────────────────────────────────
     // CREATE
     // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<FollowUpResponse> create(FollowUpRequest request,
+                                                User currentUser) {
 
-    /**
-     * Creates a follow-up for EITHER a standard lead OR a dynamic data row.
-     *
-     * Rules:
-     *  - Exactly one of leadId / dynamicDataId must be non-null.
-     *  -employeeId is optional; if null and the lead has an assignedemployee, thatemployee is used.
-     */
-    public FollowUp create(
-            Long leadId,
-            Long dynamicDataId,
-            Long employeeId,
-            LocalDate scheduledDate,
-            java.time.LocalTime scheduledTime,
-            FollowUpType type,
-            Priority priority,
-            String notes) {
-
-        // ── Validate: exactly one lead source ─────────────────────────────────
-        if (leadId == null && dynamicDataId == null) {
-            throw new IllegalArgumentException("Either leadId or dynamicDataId must be provided.");
+        // ── Validate lead source ──────────────────────────────────────────────
+        if (request.getLeadId() == null && request.getDynamicDataId() == null) {
+            throw new IllegalArgumentException(
+                    "Either leadId or dynamicDataId must be provided.");
         }
-        if (leadId != null && dynamicDataId != null) {
-            throw new IllegalArgumentException("Provide EITHER leadId OR dynamicDataId, not both.");
+        if (request.getLeadId() != null && request.getDynamicDataId() != null) {
+            throw new IllegalArgumentException(
+                    "Provide EITHER leadId OR dynamicDataId — not both.");
         }
 
-        // ── Resolve lead / dynamic record ─────────────────────────────────────
-        Leads lead  = null;
+        // ── Resolve lead ──────────────────────────────────────────────────────
+        Leads lead = null;
+        if (request.getLeadId() != null) {
+            lead = leadsRepository.findById(request.getLeadId())
+                    .orElseThrow(() -> new ResourceNotFoundException(
+                            "Lead not found: " + request.getLeadId()));
+        }
+
         DynamicData dynamicData = null;
-        User employee = null;
+        if (request.getDynamicDataId() != null) {
+            dynamicData = dynamicDataRepository.findById(request.getDynamicDataId())
+                    .orElseThrow(() -> new ResourceNotFoundException(
+                            "Dynamic lead not found: " + request.getDynamicDataId()));
+        }
 
-        if (leadId != null) {
-            lead = leadsRepository.findById(leadId)
-                    .orElseThrow(() -> new RuntimeException("Lead not found: " + leadId));
-            // Default to lead's assignedemployee if none specified
-            if (employeeId == null && lead.getAssignedEmp() != null) {
-                employee = lead.getAssignedEmp();
+        // ── Resolve agent ─────────────────────────────────────────────────────
+        // ADMIN  → can assign to anyone via request.agentId
+        //          if no agentId given → use lead's assigned agent
+        // USER   → always assigned to themselves — ignore request.agentId
+        User agent;
+        if (isAdmin(currentUser)) {
+            if (request.getAgentId() != null) {
+                agent = userRepository.findById(request.getAgentId())
+                        .orElseThrow(() -> new ResourceNotFoundException(
+                                "Agent not found: " + request.getAgentId()));
+            } else if (lead != null && lead.getAssignedEmp() != null) {
+                agent = lead.getAssignedEmp();
+            } else if (dynamicData != null
+                    && dynamicData.getAssignedEmployee() != null) {
+                agent = dynamicData.getAssignedEmployee();
+            } else {
+                agent = currentUser; // fallback
             }
+        } else {
+            // Employee always creates for themselves
+            agent = currentUser;
         }
 
-        if (dynamicDataId != null) {
-            dynamicData = dynamicDataRepository.findById(dynamicDataId)
-                    .orElseThrow(() -> new RuntimeException("DynamicData not found: " + dynamicDataId));
-            if (employeeId == null && dynamicData.getAssignedEmployee() != null) {
-               employee = dynamicData.getAssignedEmployee();
-            }
-        }
-
-        // Explicitemployee override
-        if (employeeId != null) {
-           employee = employeeRepository.findById(employeeId)
-                    .orElseThrow(() -> new RuntimeException("Agent not found: " +employeeId));
-        }
-
-        // ── Build & persist ───────────────────────────────────────────────────
+        // ── Build & save ──────────────────────────────────────────────────────
         FollowUp followUp = FollowUp.builder()
                 .lead(lead)
                 .dynamicData(dynamicData)
-                .assignedTo(employee)
-                .scheduledDate(scheduledDate)
-                .scheduledTime(scheduledTime)
-                .type(type)
-                .priority(priority)
-                .notes(notes)
+                .assignedTo(agent)
+                .scheduledDate(request.getScheduledDate())
+                .scheduledTime(request.getScheduledTime())
+                .type(request.getType())
+                .priority(request.getPriority() != null
+                        ? request.getPriority()
+                        : Priority.MEDIUM)
+                .notes(request.getNotes())
                 .done(false)
                 .build();
 
         FollowUp saved = followUpRepository.save(followUp);
-        log.info("FollowUp created id={} for {} on {}",
-                saved.getFollowUpId(), saved.getLeadDisplayName(), scheduledDate);
-        return saved;
+
+        // ── Log activity ──────────────────────────────────────────────────────
+        activityLogService.log(
+                currentUser,
+                ActivityAction.FOLLOW_UP_CREATED,
+                EmployeeActivityLog.ActivityModule.FOLLOW_UP,
+                saved.getFollowUpId(),
+                "Created follow-up for " + saved.getLeadDisplayName()
+                        + " scheduled on " + saved.getScheduledDate()
+                        + " | Type: " + saved.getType()
+                        + " | Assigned to: " + agent.getName());
+
+        log.info("FollowUp created — id={} by={} assignedTo={}",
+                saved.getFollowUpId(),
+                currentUser.getName(),
+                agent.getName());
+
+        return ApiResponse.success(
+                "Follow-up created successfully.",
+                convertToResponse(saved));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // READ
+    // GET ALL
+    // ADMIN  → all follow-ups
+    // USER   → only their own
     // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<List<FollowUpResponse>> getAll(User currentUser) {
 
-    public FollowUp getById(Long id) {
-        return followUpRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("FollowUp not found: " + id));
+        List<FollowUp> list = isAdmin(currentUser)
+                ? followUpRepository.findAll()
+                : followUpRepository.findByAssignedTo_Id(currentUser.getId());
+
+        return ApiResponse.success(
+                "Follow-ups fetched successfully.",
+                list.stream().map(this::convertToResponse)
+                        .collect(Collectors.toList()));
     }
 
-    public List<FollowUp> getAll() {
-        return followUpRepository.findAll();
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET BY ID
+    // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<FollowUpResponse> getById(Long id, User currentUser) {
+
+        FollowUp followUp = followUpRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "FollowUp not found: " + id));
+
+        // Employee can only see their own
+        if (!isAdmin(currentUser)
+                && !followUp.getAssignedTo().getId().equals(currentUser.getId())) {
+            throw new SecurityException(
+                    "You are not allowed to view this follow-up.");
+        }
+
+        return ApiResponse.success(
+                "Follow-up fetched successfully.",
+                convertToResponse(followUp));
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET TODAY
+    // ADMIN  → all today's follow-ups
+    // USER   → only their today's follow-ups
+    // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<List<FollowUpResponse>> getToday(User currentUser) {
 
-    public List<FollowUp> getByStandardLead(Long leadId) {
-        return followUpRepository.findByLeadId(leadId);
+        List<FollowUp> list = isAdmin(currentUser)
+                ? followUpRepository.findByScheduledDateAndDoneFalse(
+                LocalDate.now())
+                : followUpRepository.findByAssignedToIdAndScheduledDateAndDoneFalse(
+                currentUser.getId(), LocalDate.now());
+
+        return ApiResponse.success(
+                "Today's follow-ups fetched successfully.",
+                list.stream().map(this::convertToResponse)
+                        .collect(Collectors.toList()));
     }
 
-    public List<FollowUp> getByDynamicData(Long dynamicDataId) {
-        return followUpRepository.findByDynamicDataId(dynamicDataId);
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET OVERDUE
+    // ADMIN  → all overdue
+    // USER   → only their overdue
+    // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<List<FollowUpResponse>> getOverdue(User currentUser) {
+
+        List<FollowUp> list = isAdmin(currentUser)
+                ? followUpRepository.findOverdue(LocalDate.now())
+                : followUpRepository.findOverdueByAssignedToId(
+                LocalDate.now(), currentUser.getId());
+
+        return ApiResponse.success(
+                "Overdue follow-ups fetched successfully.",
+                list.stream().map(this::convertToResponse)
+                        .collect(Collectors.toList()));
     }
 
-    public List<FollowUp> getByAgent(Long agentId) {
-        return followUpRepository.findByAssignedTo_Id(agentId);
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET UPCOMING
+    // ADMIN  → all upcoming
+    // USER   → only their upcoming
+    // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<List<FollowUpResponse>> getUpcoming(User currentUser) {
+
+        List<FollowUp> list = isAdmin(currentUser)
+                ? followUpRepository.findUpcoming(LocalDate.now())
+                : followUpRepository.findUpcomingByAssignedToId(
+                LocalDate.now(), currentUser.getId());
+
+        return ApiResponse.success(
+                "Upcoming follow-ups fetched successfully.",
+                list.stream().map(this::convertToResponse)
+                        .collect(Collectors.toList()));
     }
 
-    public List<FollowUp> getOverdue() {
-        return followUpRepository.findOverdue(LocalDate.now());
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET BY LEAD
+    // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<List<FollowUpResponse>> getByLeadId(Long leadId,
+                                                           User currentUser) {
+        List<FollowUp> list = isAdmin(currentUser)
+                ? followUpRepository.findByLeadId(leadId)
+                : followUpRepository.findByLeadIdAndAssignedToId(
+                leadId, currentUser.getId());
+
+        return ApiResponse.success(
+                "Follow-ups for lead fetched successfully.",
+                list.stream().map(this::convertToResponse)
+                        .collect(Collectors.toList()));
     }
 
-    public List<FollowUp> getToday() {
-        return followUpRepository.findByScheduledDateAndDoneFalse(LocalDate.now());
-    }
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET BY DYNAMIC LEAD
+    // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<List<FollowUpResponse>> getByDynamicDataId(
+            Long dynamicDataId, User currentUser) {
 
-    public List<FollowUp> getUpcoming() {
-        return followUpRepository.findUpcoming(LocalDate.now());
-    }
+        List<FollowUp> list = isAdmin(currentUser)
+                ? followUpRepository.findByDynamicDataId(dynamicDataId)
+                : followUpRepository.findByDynamicDataIdAndAssignedToId(
+                dynamicDataId, currentUser.getId());
 
-    public List<FollowUp> getPending() {
-        // overdue + today
-        List<FollowUp> result = followUpRepository.findOverdue(LocalDate.now());
-        result.addAll(followUpRepository.findByScheduledDateAndDoneFalse(LocalDate.now()));
-        return result;
+        return ApiResponse.success(
+                "Follow-ups for dynamic lead fetched successfully.",
+                list.stream().map(this::convertToResponse)
+                        .collect(Collectors.toList()));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // UPDATE
     // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<FollowUpResponse> update(Long id,
+                                                FollowUpRequest request,
+                                                User currentUser) {
+        FollowUp followUp = followUpRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "FollowUp not found: " + id));
 
-    public FollowUp update(Long id,
-                           LocalDate scheduledDate,
-                           java.time.LocalTime scheduledTime,
-                           FollowUpType type,
-                           Priority priority,
-                           String notes) {
-        FollowUp fu = getById(id);
-        if (scheduledDate != null) fu.setScheduledDate(scheduledDate);
-        if (scheduledTime != null) fu.setScheduledTime(scheduledTime);
-        if (type          != null) fu.setType(type);
-        if (priority      != null) fu.setPriority(priority);
-        if (notes         != null) fu.setNotes(notes);
-        return followUpRepository.save(fu);
+        // Employee can only update their own
+        if (!isAdmin(currentUser)
+                && !followUp.getAssignedTo().getId().equals(currentUser.getId())) {
+            throw new SecurityException(
+                    "You are not allowed to update this follow-up.");
+        }
+
+        if (request.getScheduledDate() != null)
+            followUp.setScheduledDate(request.getScheduledDate());
+        if (request.getScheduledTime() != null)
+            followUp.setScheduledTime(request.getScheduledTime());
+        if (request.getType() != null)
+            followUp.setType(request.getType());
+        if (request.getPriority() != null)
+            followUp.setPriority(request.getPriority());
+        if (request.getNotes() != null)
+            followUp.setNotes(request.getNotes());
+
+        FollowUp updated = followUpRepository.save(followUp);
+
+        // ── Log activity ──────────────────────────────────────────────────────
+        activityLogService.log(
+                currentUser,
+                ActivityAction.FOLLOW_UP_UPDATED,
+                EmployeeActivityLog.ActivityModule.FOLLOW_UP,
+                id,
+                "Updated follow-up for " + updated.getLeadDisplayName()
+                        + " | New date: " + updated.getScheduledDate());
+
+        return ApiResponse.success(
+                "Follow-up updated successfully.",
+                convertToResponse(updated));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // MARK DONE
     // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<FollowUpResponse> markDone(Long id,
+                                                  String outcome,
+                                                  User currentUser) {
+        FollowUp followUp = followUpRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "FollowUp not found: " + id));
 
-    public FollowUp markDone(Long id, String outcome) {
-        FollowUp fu = getById(id);
-        fu.setDone(true);
-        fu.setDoneAt(LocalDateTime.now());
-        fu.setOutcome(outcome);
-        FollowUp saved = followUpRepository.save(fu);
-        log.info("FollowUp {} marked done for {}", id, saved.getLeadDisplayName());
-        return saved;
+        // Employee can only mark their own as done
+        if (!isAdmin(currentUser)
+                && !followUp.getAssignedTo().getId().equals(currentUser.getId())) {
+            throw new SecurityException(
+                    "You are not allowed to mark this follow-up as done.");
+        }
+
+        followUp.setDone(true);
+        followUp.setDoneAt(LocalDateTime.now());
+        followUp.setOutcome(outcome);
+
+        FollowUp saved = followUpRepository.save(followUp);
+
+        // ── Log activity ──────────────────────────────────────────────────────
+        activityLogService.log(
+                currentUser,
+                ActivityAction.FOLLOW_UP_DONE,
+                EmployeeActivityLog.ActivityModule.FOLLOW_UP,
+                id,
+                "Marked follow-up done for " + saved.getLeadDisplayName()
+                        + " | Outcome: " + (outcome != null ? outcome : "No outcome added"));
+
+        return ApiResponse.success(
+                "Follow-up marked as done.",
+                convertToResponse(saved));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // DELETE
+    // TRANSFER — ADMIN ONLY
     // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<FollowUpResponse> transfer(Long followUpId,
+                                                  FollowUpTransferRequest request,
+                                                  User adminUser) {
 
-    public void delete(Long id) {
+        // Only admin can transfer
+        if (!isAdmin(adminUser)) {
+            throw new SecurityException(
+                    "Only ADMIN can transfer follow-ups.");
+        }
+
+        FollowUp followUp = followUpRepository.findById(followUpId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "FollowUp not found: " + followUpId));
+
+        User toEmployee = userRepository.findById(request.getToEmployeeId())
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Employee not found: " + request.getToEmployeeId()));
+
+        User fromEmployee = followUp.getAssignedTo();
+
+        // ── Save transfer log BEFORE changing agent ───────────────────────────
+        FollowUpTransferLog transferLog = FollowUpTransferLog.builder()
+                .followUp(followUp)
+                .fromEmployee(fromEmployee)
+                .fromEmployeeName(fromEmployee != null
+                        ? fromEmployee.getName() : "Unassigned")
+                .toEmployee(toEmployee)
+                .toEmployeeName(toEmployee.getName())
+                .transferredBy(adminUser)
+                .transferredByName(adminUser.getName())
+                .reason(request.getReason())
+                .build();
+
+        transferLogRepository.save(transferLog);
+
+        // ── Now change the agent ──────────────────────────────────────────────
+        followUp.setAssignedTo(toEmployee);
+        FollowUp saved = followUpRepository.save(followUp);
+
+        // ── Log activity for BOTH employees ───────────────────────────────────
+        if (fromEmployee != null) {
+            activityLogService.log(
+                    fromEmployee,
+                    ActivityAction.FOLLOW_UP_TRANSFERRED,
+                    EmployeeActivityLog.ActivityModule.FOLLOW_UP,
+                    followUpId,
+                    "Follow-up transferred FROM you TO "
+                            + toEmployee.getName()
+                            + " | Reason: " + request.getReason()
+                            + " | By Admin: " + adminUser.getName());
+        }
+
+        activityLogService.log(
+                toEmployee,
+                ActivityAction.FOLLOW_UP_TRANSFERRED,
+                EmployeeActivityLog.ActivityModule.FOLLOW_UP,
+                followUpId,
+                "Follow-up transferred TO you FROM "
+                        + (fromEmployee != null ? fromEmployee.getName() : "Unassigned")
+                        + " | Reason: " + request.getReason()
+                        + " | By Admin: " + adminUser.getName());
+
+        log.info("FollowUp {} transferred from {} to {} by admin {} | reason={}",
+                followUpId,
+                fromEmployee != null ? fromEmployee.getName() : "none",
+                toEmployee.getName(),
+                adminUser.getName(),
+                request.getReason());
+
+        return ApiResponse.success(
+                "Follow-up transferred to " + toEmployee.getName()
+                        + " successfully.",
+                convertToResponse(saved));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET TRANSFER HISTORY — ADMIN ONLY
+    // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<List<FollowUpTransferLogResponse>> getTransferHistory(
+            Long followUpId, User adminUser) {
+
+        if (!isAdmin(adminUser)) {
+            throw new SecurityException(
+                    "Only ADMIN can view transfer history.");
+        }
+
+        List<FollowUpTransferLogResponse> list = transferLogRepository
+                .findByFollowUpFollowUpIdOrderByTransferredAtDesc(followUpId)
+                .stream()
+                .map(this::convertTransferLog)
+                .collect(Collectors.toList());
+
+        return ApiResponse.success(
+                "Transfer history fetched successfully.", list);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DELETE — ADMIN ONLY
+    // ─────────────────────────────────────────────────────────────────────────
+    public ApiResponse<Void> delete(Long id, User currentUser) {
+
+        if (!isAdmin(currentUser)) {
+            throw new SecurityException(
+                    "Only ADMIN can delete follow-ups.");
+        }
+
+        if (!followUpRepository.existsById(id)) {
+            throw new ResourceNotFoundException("FollowUp not found: " + id);
+        }
+
         followUpRepository.deleteById(id);
+
+        activityLogService.log(
+                currentUser,
+                ActivityAction.DELETED,
+                EmployeeActivityLog.ActivityModule.FOLLOW_UP,
+                id,
+                "Deleted follow-up id=" + id);
+
+        return ApiResponse.success(
+                "Follow-up deleted successfully.", null);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // BULK REASSIGN (used during agent transfer)
+    // HELPERS
     // ─────────────────────────────────────────────────────────────────────────
-
-    public int reassignPendingFollowUps(Long fromAgentId, Long toAgentId) {
-        int count = followUpRepository.reassignPending(fromAgentId, toAgentId);
-        log.info("Reassigned {} pending follow-ups from agent {} to {}", count, fromAgentId, toAgentId);
-        return count;
+    private boolean isAdmin(User user) {
+        return user.getRole() == Role.ADMIN;
     }
 
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // DASHBOARD STATS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    public Map<String, Object> getDashboardStats() {
-        Map<String, Object> stats = new HashMap<>();
-        stats.put("totalFollowUps",   followUpRepository.count());
-        stats.put("pendingToday",     followUpRepository.countDueToday(LocalDate.now()));
-        stats.put("overdue",          followUpRepository.findOverdue(LocalDate.now()).size());
-        stats.put("completedToday",   followUpRepository
-                .findByScheduledDateAndDoneFalse(LocalDate.now()).stream()
-                .filter(FollowUp::getDone).count());
-        return stats;
+    private FollowUpResponse convertToResponse(FollowUp f) {
+        return FollowUpResponse.builder()
+                .followUpId(f.getFollowUpId())
+                .leadId(f.getLead() != null
+                        ? f.getLead().getId() : null)
+                .dynamicDataId(f.getDynamicData() != null
+                        ? f.getDynamicData().getId() : null)
+                .isDynamicLead(f.getDynamicData() != null)
+                .leadDisplayName(f.getLeadDisplayName())
+                .leadPhone(f.getLeadPhone())
+                .leadEmail(f.getLeadEmail())
+                .agentId(f.getAssignedTo() != null
+                        ? f.getAssignedTo().getId() : null)
+                .agentName(f.getAssignedTo() != null
+                        ? f.getAssignedTo().getName() : null)
+                .scheduledDate(f.getScheduledDate())
+                .scheduledTime(f.getScheduledTime())
+                .type(f.getType())
+                .priority(f.getPriority())
+                .notes(f.getNotes())
+                .outcome(f.getOutcome())
+                .done(f.getDone())
+                .doneAt(f.getDoneAt())
+                .createdAt(f.getCreatedAt())
+                .updatedAt(f.getUpdatedAt())
+                .build();
     }
 
+    private FollowUpTransferLogResponse convertTransferLog(
+            FollowUpTransferLog log) {
+        return FollowUpTransferLogResponse.builder()
+                .id(log.getId())
+                .followUpId(log.getFollowUp().getFollowUpId())
+                .leadName(log.getFollowUp().getLeadDisplayName())
+                .fromEmployeeId(log.getFromEmployee() != null
+                        ? log.getFromEmployee().getId() : null)
+                .fromEmployeeName(log.getFromEmployeeName())
+                .toEmployeeId(log.getToEmployee() != null
+                        ? log.getToEmployee().getId() : null)
+                .toEmployeeName(log.getToEmployeeName())
+                .transferredById(log.getTransferredBy().getId())
+                .transferredByName(log.getTransferredByName())
+                .reason(log.getReason())
+                .transferredAt(log.getTransferredAt())
+                .build();
+    }
 }

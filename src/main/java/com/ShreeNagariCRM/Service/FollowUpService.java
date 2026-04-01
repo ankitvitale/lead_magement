@@ -10,7 +10,7 @@ import com.ShreeNagariCRM.Entity.EmployeeActivityLog.ActivityAction;
 import com.ShreeNagariCRM.Entity.enums.Priority;
 import com.ShreeNagariCRM.Entity.enums.Role;
 import com.ShreeNagariCRM.Repository.*;
-import com.ShreeNagariCRM.exception.ResourceNotFoundException;
+import com.ShreeNagariCRM.Exception.ResourceNotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;

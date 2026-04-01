@@ -1,4 +1,4 @@
-package com.ShreeNagariCRM.exception;
+package com.ShreeNagariCRM.Exception;
 
 import com.ShreeNagariCRM.DTO.baseDto.ApiResponse;
 import lombok.extern.slf4j.Slf4j;

@@ -1,4 +1,4 @@
-package com.ShreeNagariCRM.exception;
+package com.ShreeNagariCRM.Exception;
 
 public class DuplicateResourceException extends RuntimeException{
     public DuplicateResourceException(String message) {

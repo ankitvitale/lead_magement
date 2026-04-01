@@ -14,6 +14,17 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 @EnableMethodSecurity
 public class SecurityConfig {
 
+    private static final String[] PUBLIC_URLS = {
+            "/swagger-ui/**", "/v3/api-docs/**", "/swagger-resources/**",
+            "/auth/login",
+            "/auth/register",
+            "/upload",
+            "/all-files-data",
+            "/update-status",
+            "/all/files",
+            "/data-by-file",
+    };
+
     private final JwtAuthFilter jwtAuthFilter;
 
     public SecurityConfig(JwtAuthFilter jwtAuthFilter) {
@@ -25,7 +36,7 @@ public class SecurityConfig {
 
         http.csrf(csrf -> csrf.disable())
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/auth/login","/auth/register","/upload","/all-files-data","/update-status","/all/files","/data-by-file").permitAll()
+                        .requestMatchers(PUBLIC_URLS).permitAll()
                         .requestMatchers("/admin/**").hasRole("ADMIN")
                         .requestMatchers("/user/**").hasRole("USER")
                         .anyRequest().authenticated()

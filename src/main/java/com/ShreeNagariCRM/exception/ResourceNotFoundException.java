@@ -1,4 +1,4 @@
-package com.ShreeNagariCRM.exception;
+package com.ShreeNagariCRM.Exception;
 
 public class ResourceNotFoundException extends RuntimeException{
     public ResourceNotFoundException(String message) {

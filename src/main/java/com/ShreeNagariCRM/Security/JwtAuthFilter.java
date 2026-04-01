@@ -23,6 +23,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         this.service = service;
     }
 
+
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
@@ -31,25 +32,47 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 
         String header = request.getHeader("Authorization");
 
-        if (header != null && header.startsWith("Bearer ")) {
+        try {
+            if (header != null && header.startsWith("Bearer ")) {
 
-            String token = header.substring(7);
-
-            if (jwtUtil.isTokenValid(token)) {
+                String token = header.substring(7);
 
                 String identifier = jwtUtil.extractIdentifier(token);
 
-                UserDetails userDetails = service.loadUserByUsername(identifier);
+                if (identifier != null && SecurityContextHolder.getContext().getAuthentication() == null) {
 
-                UsernamePasswordAuthenticationToken auth =
-                        new UsernamePasswordAuthenticationToken(
-                                userDetails,
-                                null,
-                                userDetails.getAuthorities());
+                    UserDetails userDetails = service.loadUserByUsername(identifier);
 
-                SecurityContextHolder.getContext().setAuthentication(auth);
+                    if (jwtUtil.isTokenValid(token)) {
+
+                        UsernamePasswordAuthenticationToken auth =
+                                new UsernamePasswordAuthenticationToken(
+                                        userDetails,
+                                        null,
+                                        userDetails.getAuthorities());
+
+                        SecurityContextHolder.getContext().setAuthentication(auth);
+                    }
+                }
             }
+
+            filterChain.doFilter(request, response);
+
+        } catch (io.jsonwebtoken.ExpiredJwtException e) {
+
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            response.setContentType("application/json");
+            response.getWriter().write(
+                    "{\"message\": \"Token expired. Please login again.\"}"
+            );
+
+        } catch (Exception e) {
+
+            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            response.setContentType("application/json");
+            response.getWriter().write(
+                    "{\"message\": \"Invalid token.\"}"
+            );
         }
-        filterChain.doFilter(request, response);
     }
 }
